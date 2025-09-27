@@ -144,7 +144,7 @@ app.get("/api/poles", async (req, res) => {
  * ✅ Root route
  */
 app.get("/", (req, res) => {
-  res.send("⚡ Power Line Monitor backend with MongoDB is running...");
+  res.send("⚡ Power Line Monitor backend is running...");
 });
 
 app.listen(PORT, () => {
