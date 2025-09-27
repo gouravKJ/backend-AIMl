@@ -1,19 +1,51 @@
 const express = require("express");
-const bodyParser = require("body-parser");
 const cors = require("cors");
+const mongoose = require("mongoose");
+
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// Raw sensor history
-let sensorData = [];
-// Latest enriched pole states
-let poles = [];
-// Commands for IoT devices
-let commands = {}; // { poleId: { relay: "ON"/"OFF" } }
+
+mongoose
+  .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
+
+
+const sensorSchema = new mongoose.Schema({
+  id: String,
+  voltage: Number,
+  current: Number,
+  vibration: Number,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const poleSchema = new mongoose.Schema({
+  id: String,
+  lat: Number,
+  lng: Number,
+  voltage: Number,
+  current: Number,
+  vibration: Number,
+  faultProbability: Number,
+  weather_risk: String,
+  theft_risk: String,
+  relay: String,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const commandSchema = new mongoose.Schema({
+  poleId: String,
+  relay: String
+});
+
+const Sensor = mongoose.model("Sensor", sensorSchema);
+const Pole = mongoose.model("Pole", poleSchema);
+const Command = mongoose.model("Command", commandSchema);
 
 /**
  * ✅ IoT device sends sensor data here
@@ -21,28 +53,15 @@ let commands = {}; // { poleId: { relay: "ON"/"OFF" } }
 app.post("/api/sensors", async (req, res) => {
   const { id, lat, lng, voltage, current, vibration } = req.body;
 
-  if (
-    id === undefined ||
-    lat === undefined ||
-    lng === undefined ||
-    voltage === undefined ||
-    current === undefined ||
-    vibration === undefined
-  ) {
+  if (!id || !lat || !lng || !voltage || !current || !vibration) {
     return res.status(400).json({ message: "Invalid data format" });
   }
 
-  // Store raw reading
-  const reading = {
-    id,
-    voltage,
-    current,
-    vibration,
-    timestamp: new Date(),
-  };
-  sensorData.push(reading);
+  // Save raw sensor reading
+  const reading = new Sensor({ id, voltage, current, vibration });
+  await reading.save();
 
-  // Call AI/ML service
+  // AI/ML defaults
   let faultProbability = 0;
   let weather_risk = "normal";
   let theft_risk = "low";
@@ -60,21 +79,21 @@ app.post("/api/sensors", async (req, res) => {
       faultProbability = aiData.faultProbability ?? 0;
       weather_risk = aiData.weather_risk ?? "normal";
       theft_risk = aiData.theft_risk ?? "low";
-      faultDetected = faultProbability > 0.8; // 🔴 fault if above 80%
+      faultDetected = faultProbability > 0.8;
     }
   } catch (err) {
     console.warn("⚠️ AI/ML Service not responding, using defaults");
   }
 
-  // If fault detected → set relay OFF command
-  if (faultDetected) {
-    commands[id] = { relay: "OFF" };
-    console.log(`🚨 Fault detected at Pole ${id}, relay OFF command issued`);
-  } else {
-    commands[id] = { relay: "ON" }; // normal state
-  }
+  // Save command
+  const relayCommand = faultDetected ? "OFF" : "ON";
+  await Command.findOneAndUpdate(
+    { poleId: id },
+    { poleId: id, relay: relayCommand },
+    { upsert: true }
+  );
 
-  // Update pole state
+  // Save/update pole state
   const poleData = {
     id,
     lat,
@@ -85,46 +104,49 @@ app.post("/api/sensors", async (req, res) => {
     faultProbability,
     weather_risk,
     theft_risk,
-    relay: commands[id].relay,
-    timestamp: new Date(),
+    relay: relayCommand,
+    timestamp: new Date()
   };
 
-  const index = poles.findIndex((p) => p.id === id);
-  if (index !== -1) {
-    poles[index] = poleData;
-  } else {
-    poles.push(poleData);
-  }
+  await Pole.findOneAndUpdate({ id }, poleData, { upsert: true });
 
   console.log("📡 New Sensor Data:", reading);
   console.log("⚡ Updated Pole State:", poleData);
 
-  res.status(200).json({ message: "Data processed", sensor: reading, pole: poleData });
+  res.json({ message: "Data processed", sensor: reading, pole: poleData });
 });
 
-// ✅ IoT polls this to check relay command
-app.get("/api/commands/:id", (req, res) => {
-  const id = req.params.id;
-  const command = commands[id] || { relay: "ON" };
-  res.json(command);
+/**
+ * ✅ IoT polls this to check relay command
+ */
+app.get("/api/commands/:id", async (req, res) => {
+  const command = await Command.findOne({ poleId: req.params.id });
+  res.json(command || { relay: "ON" });
 });
 
-// ✅ Get all raw sensor data
-app.get("/api/sensors", (req, res) => {
-  res.json(sensorData);
+/**
+ * ✅ Get all raw sensor data
+ */
+app.get("/api/sensors", async (req, res) => {
+  const sensors = await Sensor.find().sort({ timestamp: -1 });
+  res.json(sensors);
 });
 
-// ✅ Get latest pole states
-app.get("/api/poles", (req, res) => {
+/**
+ * ✅ Get latest pole states
+ */
+app.get("/api/poles", async (req, res) => {
+  const poles = await Pole.find();
   res.json(poles);
 });
 
-// ✅ Root route
+/**
+ * ✅ Root route
+ */
 app.get("/", (req, res) => {
-  res.send("Power Line Monitor backend server is running...");
+  res.send("⚡ Power Line Monitor backend with MongoDB is running...");
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
